@@ -1,0 +1,20 @@
+{
+  "name": "qdragon-backup-service",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "echo 'No build step required for Vercel serverless'"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^4.21.1",
+    "googleapis": "^144.0.0",
+    "mongoose": "^8.18.2"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
