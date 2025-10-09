@@ -2,15 +2,9 @@
 import { google } from 'googleapis'
 import { Readable } from 'stream'
 import path from 'path'
+import mongoose from 'mongoose'
 import SystemSetting from '../models/systemSettingModel.js'
 import { connectToDatabase } from '../mongodb.js'
-import User from '../models/userModel.js'
-import CodeRequest from '../models/codeRequestModel.js'
-import CustomerAccount from '../models/customerAccountModel.js'
-import TopUp from '../models/topUpModel.js'
-import PlanSetting from '../models/planSettingModel.js'
-import PointTransaction from '../models/pointTransactionModel.js'
-import ExtensionRequest from '../models/extensionRequestModel.js'
 
 class GoogleDriveBackupService {
   constructor() {
@@ -123,20 +117,36 @@ class GoogleDriveBackupService {
   }
 
   sanitizeForJSON(data) {
-    return JSON.parse(JSON.stringify(data, (key, value) => {
-      if (value === undefined) return null
-      if (typeof value === 'bigint') return value.toString()
-      if (value instanceof Date) return value.toISOString()
-      if (Buffer.isBuffer(value)) return value.toString('base64')
-      if (typeof value === 'function') return null
-      return value
-    }))
-  }
+    // Recursively convert to MongoDB Extended JSON format
+    const convertToExtendedJSON = (obj) => {
+      if (obj === null || obj === undefined) return null
+      if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean') return obj
+      if (typeof obj === 'bigint') return obj.toString()
+      if (Buffer.isBuffer(obj)) return { $binary: obj.toString('base64') }
+      if (obj instanceof Date) return { $date: obj.toISOString() }
 
-  async exportCollection(Model, collectionName) {
-    const data = await Model.find({}).lean()
-    const sanitizedData = this.sanitizeForJSON(data)
-    return { collectionName, exportDate: new Date().toISOString(), documentCount: data.length, data: sanitizedData }
+      // Handle ObjectId
+      if (obj && typeof obj === 'object' && obj.constructor && obj.constructor.name === 'ObjectId') {
+        return { $oid: obj.toString() }
+      }
+
+      if (Array.isArray(obj)) {
+        return obj.map(item => convertToExtendedJSON(item))
+      }
+
+      if (typeof obj === 'object') {
+        const result = {}
+        for (const [key, value] of Object.entries(obj)) {
+          if (value === undefined) continue // Skip undefined values
+          result[key] = convertToExtendedJSON(value)
+        }
+        return result
+      }
+
+      return obj
+    }
+
+    return convertToExtendedJSON(data)
   }
 
   async uploadToGoogleDrive(folderId, fileName, jsonData) {
@@ -153,31 +163,83 @@ class GoogleDriveBackupService {
   async performBackup() {
     await this.initialize()
     const folderId = await this.createBackupFolder()
-    const collections = [
-      { model: User, name: 'users' },
-      { model: CodeRequest, name: 'code_requests' },
-      { model: CustomerAccount, name: 'customer_accounts' },
-      { model: TopUp, name: 'topups' },
-      { model: PlanSetting, name: 'plan_settings' },
-      { model: SystemSetting, name: 'system_settings' },
-      { model: PointTransaction, name: 'point_transactions' },
-      { model: ExtensionRequest, name: 'extension_requests' }
-    ]
+
+    // Get selected collections from database setting
+    const selectedCollections = await SystemSetting.getSetting('backup_selected_collections', null)
+    console.log('Selected collections setting:', selectedCollections)
+
+    // Get all collections from database dynamically
+    const db = mongoose.connection.db
+    const collections = await db.listCollections().toArray()
+    const collectionNames = collections.map(col => col.name)
+
+    // Filter out system collections
+    const userCollections = collectionNames.filter(name =>
+      !name.startsWith('system.') &&
+      !name.startsWith('_') &&
+      name !== 'sessions'
+    )
+
+    console.log('Available collections in database:', userCollections)
+
+    // Filter collections based on setting, or use all if no setting
+    let collectionsToBackup = userCollections
+    if (selectedCollections && Array.isArray(selectedCollections) && selectedCollections.length > 0) {
+      collectionsToBackup = userCollections.filter(name => selectedCollections.includes(name))
+      console.log(`Backing up ${collectionsToBackup.length} selected collections:`, collectionsToBackup)
+    } else {
+      console.log('No collection filter set, backing up all collections')
+    }
 
     const results = []
-    for (const c of collections) {
+    for (const collectionName of collectionsToBackup) {
       try {
-        const data = await this.exportCollection(c.model, c.name)
-        const baseName = c.name.replace(/_/g, '').toLowerCase()
-        const fileName = `${baseName}.json`
-        const upload = await this.uploadToGoogleDrive(folderId, fileName, data)
-        results.push({ collection: c.name, success: true, fileId: upload.id, size: upload.size })
+        // Use raw MongoDB collection for all collections
+        const collection = db.collection(collectionName)
+        const documents = await collection.find({}).toArray()
+        const sanitizedDocuments = this.sanitizeForJSON(documents)
+
+        // Export as pure JSON array (MongoDB Compass compatible)
+        const jsonString = JSON.stringify(sanitizedDocuments, null, 2)
+        const buffer = Buffer.from(jsonString, 'utf-8')
+        const stream = Readable.from(buffer)
+
+        const fileMetadata = {
+          name: `${collectionName}.json`,
+          parents: [folderId],
+          mimeType: 'application/json'
+        }
+
+        const params = {
+          requestBody: fileMetadata,
+          media: { mimeType: 'application/json', body: stream },
+          fields: 'id, name, size',
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true
+        }
+        if (this.driveId) params.driveId = this.driveId
+
+        const upload = await this.drive.files.create(params)
+        results.push({
+          collection: collectionName,
+          success: true,
+          fileId: upload.id,
+          size: upload.size,
+          documentCount: documents.length
+        })
       } catch (e) {
-        results.push({ collection: c.name, success: false, error: e.message })
+        results.push({ collection: collectionName, success: false, error: e.message })
       }
     }
 
-    const summary = { backupDate: new Date().toISOString(), folderId, collections: results }
+    const summary = {
+      backupDate: new Date().toISOString(),
+      folderId,
+      collections: results,
+      totalCollections: results.length,
+      successfulBackups: results.filter(r => r.success).length,
+      failedBackups: results.filter(r => !r.success).length
+    }
     await this.uploadToGoogleDrive(folderId, 'backupsummary.json', summary)
     return summary
   }
