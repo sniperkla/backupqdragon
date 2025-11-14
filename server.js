@@ -9,11 +9,27 @@ const app = express()
 app.use(express.json())
 
 // Health
-app.get('/health', (req, res) => res.json({ 
-  ok: true, 
-  timestamp: new Date().toISOString(),
-  service: 'backup-service'
-}))
+app.get('/health', (req, res) =>
+  res.json({
+    ok: true,
+    timestamp: new Date().toISOString(),
+    service: 'backup-service'
+  })
+)
+
+// Keep-alive endpoint for cronjob.org to prevent Render free tier sleep
+app.get('/keep-alive', (req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate')
+  res.set('Pragma', 'no-cache')
+  res.set('Expires', '0')
+  res.json({
+    status: 'alive',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    service: 'backup-service'
+  })
+})
 
 // Optional simple shared-secret auth middleware for manual triggers
 function auth(req, res, next) {
@@ -34,7 +50,7 @@ async function startServer() {
     // Initialize the backup scheduler
     await initScheduler()
     console.log('✅ Backup scheduler initialized')
-    
+
     app.listen(port, () => {
       console.log(`🚀 Backup service listening on http://localhost:${port}`)
       console.log(`📅 Automated backups are running based on database settings`)
@@ -42,10 +58,12 @@ async function startServer() {
   } catch (error) {
     console.error('❌ Failed to start server:', error)
     console.warn('⚠️  Server will start but scheduler may not be working')
-    
+
     app.listen(port, () => {
       console.log(`🚀 Backup service listening on http://localhost:${port}`)
-      console.log(`⚠️  Scheduler initialization failed - only manual backups available`)
+      console.log(
+        `⚠️  Scheduler initialization failed - only manual backups available`
+      )
     })
   }
 }

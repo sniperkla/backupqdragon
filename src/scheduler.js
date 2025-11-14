@@ -20,31 +20,39 @@ function friendly(expr) {
 
 function scheduleTask(expr) {
   if (currentTask) {
-    try { currentTask.stop() } catch {}
+    try {
+      currentTask.stop()
+    } catch {}
     currentTask = null
   }
   currentExpr = expr
-  console.log(`[Scheduler] Scheduling backup with cron: ${expr} (${friendly(expr)})`)
-  currentTask = cron.schedule(expr, async () => {
-    try {
-      console.log('⏰ [Scheduler] Automated backup triggered')
-      await connectToDatabase()
-      const svc = new GoogleDriveBackupService()
-      const start = Date.now()
-      const result = await svc.performBackup()
-      await svc.cleanupOldBackups(48)
-      const dur = ((Date.now() - start)/1000).toFixed(2)
-      console.log(`✅ [Scheduler] Backup completed in ${dur}s`)
-    } catch (e) {
-      console.error('❌ [Scheduler] Backup failed:', e.message)
-    }
-  }, { scheduled: true })
+  console.log(
+    `[Scheduler] Scheduling backup with cron: ${expr} (${friendly(expr)})`
+  )
+  currentTask = cron.schedule(
+    expr,
+    async () => {
+      try {
+        console.log('⏰ [Scheduler] Automated backup triggered')
+        await connectToDatabase()
+        const svc = new GoogleDriveBackupService()
+        const start = Date.now()
+        const result = await svc.performBackup()
+        await svc.cleanupOldBackups(48)
+        const dur = ((Date.now() - start) / 1000).toFixed(2)
+        console.log(`✅ [Scheduler] Backup completed in ${dur}s`)
+      } catch (e) {
+        console.error('❌ [Scheduler] Backup failed:', e.message)
+      }
+    },
+    { scheduled: true }
+  )
 }
 
 async function loadExprFromDb() {
   await connectToDatabase()
   const expr = await SystemSetting.getSetting('backup_cron_schedule', null)
-  return (typeof expr === 'string' && expr.trim()) ? expr.trim() : DEFAULT_EXPR
+  return typeof expr === 'string' && expr.trim() ? expr.trim() : DEFAULT_EXPR
 }
 
 export async function initScheduler() {
@@ -52,7 +60,10 @@ export async function initScheduler() {
     const expr = await loadExprFromDb()
     scheduleTask(expr)
   } catch (e) {
-    console.warn('[Scheduler] Failed to initialize from DB, using default:', e.message)
+    console.warn(
+      '[Scheduler] Failed to initialize from DB, using default:',
+      e.message
+    )
     scheduleTask(DEFAULT_EXPR)
   }
 
@@ -61,11 +72,14 @@ export async function initScheduler() {
     try {
       const expr = await loadExprFromDb()
       if (expr !== currentExpr) {
-        console.log(`[Scheduler] Detected schedule change: ${currentExpr} -> ${expr}`)
+        console.log(
+          `[Scheduler] Detected schedule change: ${currentExpr} -> ${expr}`
+        )
         scheduleTask(expr)
       }
     } catch (e) {
+      console.log('[Scheduler] Failed to poll for schedule changes:', e.message)
       // non-fatal
     }
-  }, 60000)
+  }, 12000)
 }

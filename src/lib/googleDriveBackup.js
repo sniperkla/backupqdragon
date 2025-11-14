@@ -164,31 +164,51 @@ class GoogleDriveBackupService {
     await this.initialize()
     const folderId = await this.createBackupFolder()
 
-    // Get selected collections from database setting
-    const selectedCollections = await SystemSetting.getSetting('backup_selected_collections', null)
-    console.log('Selected collections setting:', selectedCollections)
+    // Read backup filters from SystemSetting
+    const [selectedCollections, excludeCollections, includeSystemCollections] = await Promise.all([
+      SystemSetting.getSetting('backup_selected_collections', null).catch(() => null),
+      SystemSetting.getSetting('backup_exclude_collections', []).catch(() => []),
+      SystemSetting.getSetting('backup_include_system_collections', false).catch(() => false)
+    ])
+    console.log('Selected collections:', selectedCollections || 'all')
+    console.log('Exclude collections:', excludeCollections)
+    console.log('Include system collections:', includeSystemCollections)
 
     // Get all collections from database dynamically
     const db = mongoose.connection.db
     const collections = await db.listCollections().toArray()
     const collectionNames = collections.map(col => col.name)
 
-    // Filter out system collections
-    const userCollections = collectionNames.filter(name =>
-      !name.startsWith('system.') &&
-      !name.startsWith('_') &&
-      name !== 'sessions'
-    )
+    const totalCount = collectionNames.length
 
-    console.log('Available collections in database:', userCollections)
+    // Filter out system collections unless explicitly included
+    let filtered = collectionNames
+    if (!includeSystemCollections) {
+      filtered = filtered.filter(name =>
+        !name.startsWith('system.') &&
+        !name.startsWith('_') &&
+        name !== 'sessions'
+      )
+    }
 
-    // Filter collections based on setting, or use all if no setting
-    let collectionsToBackup = userCollections
+    // Apply explicit excludes from setting
+    const excludedSet = new Set(excludeCollections || [])
+    filtered = filtered.filter(name => !excludedSet.has(name))
+
+    console.log(`DB collections: ${totalCount}, after filters: ${filtered.length}`)
+    if (filtered.length !== totalCount) {
+      const excludedDerived = collectionNames.filter(n => !filtered.includes(n))
+      console.log('Excluded collections:', excludedDerived)
+    }
+
+    // Filter collections based on selected list (if provided)
+    let collectionsToBackup = filtered
     if (selectedCollections && Array.isArray(selectedCollections) && selectedCollections.length > 0) {
-      collectionsToBackup = userCollections.filter(name => selectedCollections.includes(name))
+      const selectedSet = new Set(selectedCollections)
+      collectionsToBackup = filtered.filter(name => selectedSet.has(name))
       console.log(`Backing up ${collectionsToBackup.length} selected collections:`, collectionsToBackup)
     } else {
-      console.log('No collection filter set, backing up all collections')
+      console.log('No collection filter set, backing up all filtered collections')
     }
 
     const results = []
@@ -246,12 +266,70 @@ class GoogleDriveBackupService {
 
   async cleanupOldBackups(keepCount = 48) {
     if (!this.parentFolderId) return
-    const response = await this.drive.files.list({ q: `'${this.parentFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`, fields: 'files(id, name, createdTime)', orderBy: 'createdTime desc', supportsAllDrives: true, includeItemsFromAllDrives: true })
+
+    // Helper: normalize createdTime into YYYY-MM-DD in Asia/Bangkok (UTC+7)
+    const toBangkokDateKey = (iso) => {
+      const d = new Date(iso)
+      const bangkokMs = d.getTime() + (7 * 60 * 60 * 1000) // UTC+7, no DST
+      const bd = new Date(bangkokMs)
+      const y = bd.getUTCFullYear()
+      const m = String(bd.getUTCMonth() + 1).padStart(2, '0')
+      const day = String(bd.getUTCDate()).padStart(2, '0')
+      return `${y}-${m}-${day}`
+    }
+
+    const response = await this.drive.files.list({
+      q: `'${this.parentFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name, createdTime)',
+      orderBy: 'createdTime desc',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true
+    })
     const folders = response.data.files || []
-    if (folders.length <= keepCount) return
-    const toDelete = folders.slice(keepCount)
+    if (folders.length === 0) return
+
+    // Group folders by date key (Bangkok) and keep newest per day
+    const groups = new Map()
+    for (const f of folders) {
+      const key = toBangkokDateKey(f.createdTime)
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(f)
+    }
+
+    // Sort each group by createdTime desc and mark survivors (keep one per day)
+    const keepPerDay = new Map()
+    for (const [key, arr] of groups.entries()) {
+      arr.sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime))
+      keepPerDay.set(key, arr[0])
+    }
+
+    // If keepCount is provided, keep only newest N days; older days fully deleted
+    const sortedDays = Array.from(groups.keys()).sort((a, b) => (a < b ? 1 : -1)) // desc by date string
+    const daysToKeep = new Set(sortedDays.slice(0, Math.max(0, keepCount)))
+
+    const toDelete = []
+    for (const [key, arr] of groups.entries()) {
+      // If day not in keep set, delete all in that day
+      if (!daysToKeep.has(key)) {
+        toDelete.push(...arr)
+        continue
+      }
+      // Else delete all except the newest one for that day
+      const survivor = keepPerDay.get(key)
+      for (const f of arr) {
+        if (f.id !== survivor.id) toDelete.push(f)
+      }
+    }
+
+    if (toDelete.length > 0) {
+      console.log(`🧹 Cleanup: deleting ${toDelete.length} old backup folders (keeping 1 per day, last ${daysToKeep.size} day(s))`)
+    }
     for (const f of toDelete) {
-      try { await this.drive.files.delete({ fileId: f.id, supportsAllDrives: true }) } catch {}
+      try {
+        await this.drive.files.delete({ fileId: f.id, supportsAllDrives: true })
+      } catch (e) {
+        console.warn(`Failed to delete folder ${f.id}: ${e.message}`)
+      }
     }
   }
 }

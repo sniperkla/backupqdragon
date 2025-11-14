@@ -18,13 +18,27 @@ export async function statusHandler(req, res) {
   try {
     await connectToDatabase()
     const SystemSetting = (await import('./models/systemSettingModel.js')).default
-    const selectedCollections = await SystemSetting.getSetting('backup_selected_collections', null)
+    const [selectedCollections, excludeCollections, includeSystemCollections] = await Promise.all([
+      SystemSetting.getSetting('backup_selected_collections', null).catch(() => null),
+      SystemSetting.getSetting('backup_exclude_collections', []).catch(() => []),
+      SystemSetting.getSetting('backup_include_system_collections', false).catch(() => false)
+    ])
 
     // Get available collections from database
     const mongoose = (await import('mongoose')).default
     const db = mongoose.connection.db
     const dbCollections = await db.listCollections().toArray()
-    const availableCollections = dbCollections.map(col => col.name)
+    const allCollections = dbCollections.map(col => col.name)
+    let availableCollections = allCollections
+    if (!includeSystemCollections) {
+      availableCollections = availableCollections.filter(name =>
+        !name.startsWith('system.') &&
+        !name.startsWith('_') &&
+        name !== 'sessions'
+      )
+    }
+    const excludedBySetting = (excludeCollections || [])
+    availableCollections = availableCollections.filter(n => !excludedBySetting.includes(n))
 
     return res.json({
       success: true,
@@ -34,8 +48,11 @@ export async function statusHandler(req, res) {
         backupInterval: '30 minutes',
         retentionPolicy: '48 backups (24 hours)',
         selectedCollections: selectedCollections || 'all',
-        availableCollections: availableCollections,
-        totalCollections: availableCollections.length
+        includeSystemCollections,
+        excludeCollections,
+        totalDbCollections: allCollections.length,
+        availableCollections,
+        totalAvailableCollections: availableCollections.length
       }
     })
   } catch (e) {

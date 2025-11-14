@@ -106,6 +106,12 @@ The server will:
 GET /health
 ```
 
+#### Keep Alive (for cronjob.org)
+```bash
+GET /keep-alive
+```
+Returns service status, uptime, and memory usage. Use this with cronjob.org to prevent Render free tier from sleeping.
+
 #### Manual Backup
 ```bash
 POST /backup/manual
@@ -180,10 +186,16 @@ railway init
 railway up
 ```
 
-### Render
-1. Connect GitHub repo
+### Render (with cronjob.org for uptime)
+1. Connect GitHub repo to Render
 2. Create Web Service
 3. Set build/start commands
+4. **Set up cronjob.org to keep service awake:**
+   - Go to [cronjob.org](https://cronjob.org)
+   - Create new cron job
+   - URL: `https://your-app.onrender.com/keep-alive`
+   - Schedule: Every 10 minutes (`*/10 * * * *`)
+   - This prevents Render free tier from sleeping
 
 ### Traditional Server
 ```bash
@@ -207,6 +219,25 @@ pm2 save
 ├── set-backup-collections.js  # Configuration helper
 └── package.json
 ```
+
+## Keeping Service Awake (Render Free Tier)
+
+Render's free tier sleeps after 15 minutes of inactivity. To keep your backup service available:
+
+### Using cronjob.org
+
+1. **Sign up** at [cronjob.org](https://cronjob.org) (free)
+2. **Create new cron job**:
+   - **URL**: `https://your-app.onrender.com/keep-alive`
+   - **Schedule**: `*/10 * * * *` (every 10 minutes)
+   - **Method**: GET
+3. **Save** the cron job
+
+This will ping your service every 10 minutes, keeping it awake and ready for backups.
+
+### Alternative: UptimeRobot
+
+You can also use UptimeRobot (free tier available) to monitor and keep your service awake.
 
 ## Security
 
