@@ -19,11 +19,9 @@ export async function performBackupHandler(req, res) {
     if (cleanupEnabled) {
       const todayKey = (() => {
         const now = new Date()
-        const bangkokMs = now.getTime() + (7 * 60 * 60 * 1000)
-        const bd = new Date(bangkokMs)
-        const y = bd.getUTCFullYear()
-        const m = String(bd.getUTCMonth() + 1).padStart(2, '0')
-        const d = String(bd.getUTCDate()).padStart(2, '0')
+        const y = now.getFullYear()
+        const m = String(now.getMonth() + 1).padStart(2, '0')
+        const d = String(now.getDate()).padStart(2, '0')
         return `${y}-${m}-${d}`
       })()
 
@@ -57,14 +55,15 @@ export async function statusHandler(req, res) {
   try {
     await connectToDatabase()
     const SystemSetting = (await import('./models/systemSettingModel.js')).default
-    const [selectedCollections, excludeCollections, includeSystemCollections, keepDaysRaw, cleanupEnabled, cleanupMode, lastCleanupDate] = await Promise.all([
+    const [selectedCollections, excludeCollections, includeSystemCollections, keepDaysRaw, cleanupEnabled, cleanupMode, lastCleanupDate, permanentDaily] = await Promise.all([
       SystemSetting.getSetting('backup_selected_collections', null).catch(() => null),
       SystemSetting.getSetting('backup_exclude_collections', []).catch(() => []),
       SystemSetting.getSetting('backup_include_system_collections', false).catch(() => false),
       SystemSetting.getSetting('backup_keep_days', 48).catch(() => 48),
       SystemSetting.getSetting('backup_enable_cleanup', true).catch(() => true),
       SystemSetting.getSetting('backup_cleanup_mode', 'always').catch(() => 'always'),
-      SystemSetting.getSetting('backup_last_cleanup_date', null).catch(() => null)
+      SystemSetting.getSetting('backup_last_cleanup_date', null).catch(() => null),
+      SystemSetting.getSetting('backup_permanent_daily', true).catch(() => true)
     ])
     const keepDays = Number(keepDaysRaw) || 48
 
@@ -92,6 +91,7 @@ export async function statusHandler(req, res) {
         backupInterval: '30 minutes',
         retentionPolicy: `1 per day for last ${keepDays} day(s)`,
         keepDays,
+        permanentDaily,
         selectedCollections: selectedCollections || 'all',
         includeSystemCollections,
         excludeCollections,

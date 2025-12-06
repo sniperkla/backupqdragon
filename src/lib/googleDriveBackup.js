@@ -267,14 +267,12 @@ class GoogleDriveBackupService {
   async cleanupOldBackups(keepCount = 48) {
     if (!this.parentFolderId) return
 
-    // Helper: normalize createdTime into YYYY-MM-DD in Asia/Bangkok (UTC+7)
-    const toBangkokDateKey = (iso) => {
-      const d = new Date(iso)
-      const bangkokMs = d.getTime() + (7 * 60 * 60 * 1000) // UTC+7, no DST
-      const bd = new Date(bangkokMs)
-      const y = bd.getUTCFullYear()
-      const m = String(bd.getUTCMonth() + 1).padStart(2, '0')
-      const day = String(bd.getUTCDate()).padStart(2, '0')
+    // Helper: normalize date to YYYY-MM-DD using server local time (already Asia/Bangkok)
+    const toLocalDateKey = (dateInput) => {
+      const d = new Date(dateInput)
+      const y = d.getFullYear()
+      const m = String(d.getMonth() + 1).padStart(2, '0')
+      const day = String(d.getDate()).padStart(2, '0')
       return `${y}-${m}-${day}`
     }
 
@@ -288,24 +286,55 @@ class GoogleDriveBackupService {
     const folders = response.data.files || []
     if (folders.length === 0) return
 
-    // Group folders by date key (Bangkok) and keep newest per day
+    // Group folders by date key (local time)
     const groups = new Map()
     for (const f of folders) {
-      const key = toBangkokDateKey(f.createdTime)
+      const key = toLocalDateKey(f.createdTime)
       if (!groups.has(key)) groups.set(key, [])
       groups.get(key).push(f)
     }
 
-    // Sort each group by createdTime desc and mark survivors (keep one per day)
-    const keepPerDay = new Map()
+    // Sort each group by createdTime desc so newest are first
     for (const [key, arr] of groups.entries()) {
       arr.sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime))
-      keepPerDay.set(key, arr[0])
     }
 
-    // If keepCount is provided, keep only newest N days; older days fully deleted
+    // Determine today key using server local time
+    const now = new Date()
+    const todayKey = toLocalDateKey(now)
+
+    // Keep survivors: for today keep ALL backups, for previous days keep only the newest one
+    const survivorsByDay = new Map()
+    const survivorsSet = new Set()
+    for (const [key, arr] of groups.entries()) {
+      if (key === todayKey) {
+        // Keep ALL backups for today (no cleanup until day passes)
+        survivorsByDay.set(key, arr)
+        arr.forEach(s => survivorsSet.add(s.id))
+        console.log(`📅 Today (${key}): keeping all ${arr.length} backup(s)`)
+      } else {
+        // Keep only newest for previous days
+        const newest = arr[0]
+        survivorsByDay.set(key, [newest])
+        survivorsSet.add(newest.id)
+        if (arr.length > 1) {
+          console.log(`📅 Past day (${key}): keeping newest, will delete ${arr.length - 1} older backup(s)`)
+        }
+      }
+    }
+
+    // Read setting: whether to permanently keep 1 folder per day for all days
+    const permanentDaily = await SystemSetting.getSetting('backup_permanent_daily', true).catch(() => true)
+
+    // If keepCount is provided, keep only newest N days; older days fully deleted only when permanentDaily is false
     const sortedDays = Array.from(groups.keys()).sort((a, b) => (a < b ? 1 : -1)) // desc by date string
-    const daysToKeep = new Set(sortedDays.slice(0, Math.max(0, keepCount)))
+    let daysToKeep
+    if (permanentDaily) {
+      // Keep all days (survivor per day) permanently
+      daysToKeep = new Set(sortedDays)
+    } else {
+      daysToKeep = new Set(sortedDays.slice(0, Math.max(0, keepCount)))
+    }
 
     const toDelete = []
     for (const [key, arr] of groups.entries()) {
@@ -314,10 +343,11 @@ class GoogleDriveBackupService {
         toDelete.push(...arr)
         continue
       }
-      // Else delete all except the newest one for that day
-      const survivor = keepPerDay.get(key)
+      // Else delete all except the survivors for that day
+      const survivors = survivorsByDay.get(key) || []
+      const survivorIds = new Set(survivors.map(s => s.id))
       for (const f of arr) {
-        if (f.id !== survivor.id) toDelete.push(f)
+        if (!survivorIds.has(f.id)) toDelete.push(f)
       }
     }
 
